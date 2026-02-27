@@ -73,11 +73,7 @@ __pypackages__/
 .env
 .envrc
 .venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
+venv
 
 # Rope project settings
 .ropeproject
@@ -130,9 +126,6 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
-
-# env files (can opt-in for committing if needed)
-.env*
 
 # vercel
 .vercel
