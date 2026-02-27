@@ -93,13 +93,16 @@ dmypy.json
 # test files
 test.pdf
 
+# upload folder
+uploads/
+
 # mock test folder
 ml-engine
 
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
 # dependencies
-/node_modules
+node_modules
 /.pnp
 .pnp.*
 .yarn/*
@@ -112,11 +115,11 @@ ml-engine
 /coverage
 
 # next.js
-/.next/
+.next/
 /out/
 
 # production
-/build
+build/
 
 # misc
 .DS_Store
