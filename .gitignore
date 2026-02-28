@@ -136,3 +136,6 @@ next-env.d.ts
 # database
 *.db
 vector_stores
+
+ml-engine/model/onnx/*.onnx
+ml-engine/model/onnx/*.data
