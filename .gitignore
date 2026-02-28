@@ -22,6 +22,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+.vscode/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
@@ -92,9 +93,6 @@ test.pdf
 # upload folder
 uploads/
 
-# mock test folder
-ml-engine
-
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
 # dependencies
@@ -133,3 +131,11 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+
+# database
+*.db
+vector_stores
+
+ml-engine/model/onnx/*.onnx
+ml-engine/model/onnx/*.data
