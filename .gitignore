@@ -136,7 +136,3 @@ next-env.d.ts
 # database
 *.db
 vector_stores
-
-# Ignore large ONNX models and data files
-*.onnx
-*.data
