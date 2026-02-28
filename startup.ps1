@@ -1,61 +1,127 @@
-# Aura-AMD Parallel Startup & Model Sync Script
 $ErrorActionPreference = "Stop"
 
-# Configuration
-$HF_REPO = "https://huggingface.co/breadOnLaptop/aura-amd-int8/resolve/main"
-$ROOT = Get-Location
-$ML_MODEL_DIR = Join-Path $ROOT "ml-engine\model\onnx"
-$BACKEND_DIR = Join-Path $ROOT "backend"
-$FRONTEND_DIR = Join-Path $ROOT "frontend"
+# --- Paths ---
+$ROOT           = Get-Location
+$BACKEND_DIR    = Join-Path $ROOT "backend"
+$FRONTEND_DIR   = Join-Path $ROOT "frontend"
+$ML_DIR         = Join-Path $ROOT "ml-engine"
+$VENV_ACTIVATE  = Join-Path $ML_DIR ".venv\Scripts\activate.bat"
 
-# --- 1. Model Sync (Hugging Face Download) ---
-if (!(Test-Path $ML_MODEL_DIR)) { New-Item -Path $ML_MODEL_DIR -ItemType Directory -Force }
+# --- Globals & flags ---
+$Global:BackendProc   = $null
+$Global:FrontendProc  = $null
+$script:CancelRequested = $false
+$script:CleanupRunning  = $false
 
-$models = @("model-int8.onnx", "model-int8.onnx.data")
+# --- Helpers ---
+function Kill-ProcessTree {
+    param([int]$ProcessId)
 
-foreach ($file in $models) {
-    $targetPath = Join-Path $ML_MODEL_DIR $file
-    if (!(Test-Path $targetPath)) {
-        Write-Host "📥 Downloading $file from Hugging Face..." -ForegroundColor Cyan
-        $url = "$HF_REPO/$file"
-        # Using Invoke-WebRequest for large file stream
-        Invoke-WebRequest -Uri $url -OutFile $targetPath
-        Write-Host "✅ $file downloaded." -ForegroundColor Green
-    } else {
-        Write-Host "✔️ $file already exists, skipping download." -ForegroundColor Gray
+    if (-not $ProcessId) { return }
+
+    try {
+        Write-Host "RUN: taskkill /PID $ProcessId /T /F" -ForegroundColor Yellow
+        & taskkill /PID $ProcessId /T /F 2>$null
+    } catch {
+        Write-Warning "taskkill failed for PID $ProcessId - falling back to Stop-Process."
+        try { Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue } catch {}
     }
 }
 
-Write-Host "`n🚀 Starting Aura-AMD Integrated Stack..." -ForegroundColor Cyan
+function TryGracefulClose {
+    param([System.Diagnostics.Process]$Proc, [int]$timeoutSeconds = 5)
 
-# --- Garbage Collection (Cleanup) ---
+    if ($null -eq $Proc) { return $false }
+
+    try {
+        if ($Proc.HasExited) { return $true }
+
+        Write-Host "RUN: Attempting graceful CloseMainWindow for PID $($Proc.Id)" -ForegroundColor DarkCyan
+
+        $closed = $false
+        try { $closed = $Proc.CloseMainWindow() } catch {}
+
+        if ($closed) {
+            $procExited = $Proc.WaitForExit($timeoutSeconds * 1000)
+            if ($procExited) {
+                Write-Host "SUCCESS: Process $($Proc.Id) exited gracefully." -ForegroundColor Green
+                return $true
+            }
+        }
+    } catch {
+        # ignore and escalate
+    }
+    return $false
+}
+
+# --- Cleanup ---
 function Cleanup {
-    Write-Host "`n🧹 Garbage Collection: Killing parallel processes..." -ForegroundColor Yellow
-    Get-Job | Stop-Job | Remove-Job
+    if ($script:CleanupRunning) { return }
+    $script:CleanupRunning = $true
 
-    $ports = @(8080, 3000)
-    foreach ($port in $ports) {
-        $proc = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue
-        if ($proc) { Stop-Process -Id $proc.OwningProcess -Force -ErrorAction SilentlyContinue }
+    Write-Host "`nRUN: Initiating Confirmed Hard-Kill..." -ForegroundColor Red
+
+    if ($null -ne $Global:BackendProc) {
+        Write-Host "WARN: Cleaning Backend (PID: $($Global:BackendProc.Id))" -ForegroundColor Yellow
+        if (-not (TryGracefulClose -Proc $Global:BackendProc -timeoutSeconds 5)) {
+            Kill-ProcessTree -ProcessId $Global:BackendProc.Id
+        }
+    } else {
+        Write-Host "INFO: No backend process found." -ForegroundColor DarkGray
     }
-    Write-Host "System clean. Exit successful." -ForegroundColor Green
-    Exit
+
+    if ($null -ne $Global:FrontendProc) {
+        Write-Host "WARN: Cleaning Frontend (PID: $($Global:FrontendProc.Id))" -ForegroundColor Yellow
+        if (-not (TryGracefulClose -Proc $Global:FrontendProc -timeoutSeconds 5)) {
+            Kill-ProcessTree -ProcessId $Global:FrontendProc.Id
+        }
+    } else {
+        Write-Host "INFO: No frontend process found." -ForegroundColor DarkGray
+    }
+
+    Write-Host "RUN: Confirming port closure (8080/3000)..." -ForegroundColor DarkGray
+    $ports = @(8080, 3000)
+    foreach ($p in $ports) {
+        try {
+            $conns = Get-NetTCPConnection -LocalPort $p -ErrorAction SilentlyContinue
+            if ($conns) {
+                foreach ($c in $conns) {
+                    $owningPid = $c.OwningProcess
+                    if ($owningPid) {
+                        Write-Host "WARN: Force-closing process $owningPid on port $p" -ForegroundColor Red
+                        Kill-ProcessTree -ProcessId $owningPid
+                    }
+                }
+            }
+        } catch {
+            Write-Warning "Could not enumerate connections on port $p."
+        }
+    }
+
+    Write-Host "--- Cleanup complete ---" -ForegroundColor Green
 }
 
-trap { Cleanup }
+# --- Register Ctrl+C ---
+$null = Register-ObjectEvent -InputObject ([Console]) -EventName CancelKeyPress -Action {
+    $script:CancelRequested = $true
+    Write-Host "`nWARN: Ctrl+C detected - shutting down..." -ForegroundColor Magenta
+}
 
-# --- Launch Parallel Jobs ---
-# Backend (Go)
-Start-Job -Name "Aura-Backend" -ScriptBlock { param($p); cd $p; go run main.go } -ArgumentList $BACKEND_DIR
+# --- Main run ---
+try {
+    $backendCmd  = "/k cd /d `"$BACKEND_DIR`" && `"$VENV_ACTIVATE`" && go run .\cmd\api\main.go"
+    $frontendCmd = "/k cd /d `"$FRONTEND_DIR`" && npm run dev"
 
-# Frontend (Next.js)
-Start-Job -Name "Aura-Frontend" -ScriptBlock { param($p); cd $p; npm run dev } -ArgumentList $FRONTEND_DIR
+    $Global:BackendProc  = Start-Process -FilePath "cmd.exe" -ArgumentList $backendCmd -PassThru
+    $Global:FrontendProc = Start-Process -FilePath "cmd.exe" -ArgumentList $frontendCmd -PassThru
 
-# ML Environment Setup
-Start-Job -Name "Aura-ML" -ScriptBlock { param($p); cd $p; .\.venv\Scripts\Activate.ps1 } -ArgumentList (Join-Path $ROOT "ml-engine")
+    Write-Host "`nAura-AMD Active" -ForegroundColor Green
+    Write-Host "Press Ctrl+C to trigger shutdown..." -ForegroundColor White
 
-Write-Host "Dashboard: http://localhost:3000" -ForegroundColor Green
-Write-Host "ML Status: Active (INT8 Quantization)" -ForegroundColor Green
-Write-Host "Press Ctrl+C to stop all services and run garbage collection." -ForegroundColor Gray
-
-while ($true) { Start-Sleep -Seconds 1 }
+    while (-not $script:CancelRequested) {
+        Start-Sleep -Seconds 1
+    }
+}
+finally {
+    Cleanup
+}
