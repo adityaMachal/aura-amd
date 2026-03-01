@@ -142,14 +142,37 @@ foreach ($file in $MODELS) {
     }
 }
 
-# ML .venv Setup
+# ML .venv Setup (Bulletproof Version)
 $VENV_DIR = Join-Path $ML_DIR ".venv"
-if (!(Test-Path $VENV_DIR)) {
+$VENV_PYTHON = Join-Path $VENV_DIR "Scripts\python.exe"
+$REQ_FLAG = Join-Path $ML_DIR ".installed"
+
+if (!(Test-Path $REQ_FLAG)) {
     Write-Host "RUN: Creating isolated .venv and installing ML dependencies..." -ForegroundColor Yellow
     Push-Location $ML_DIR
+    
+    # 1. Wipe out any broken/half-finished .venv from previous errors
+    if (Test-Path $VENV_DIR) { Remove-Item -Path $VENV_DIR -Recurse -Force }
+    
+    # 2. Create the virtual environment
     python -m venv .venv
-    .\.venv\Scripts\python.exe -m pip install --upgrade pip
-    .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+    
+    # 3. Fallback check: Some Windows Python versions create a 'bin' folder instead of 'Scripts'
+    if (!(Test-Path $VENV_PYTHON)) {
+        $VENV_PYTHON = Join-Path $VENV_DIR "bin\python.exe"
+    }
+    
+    # 4. Use the absolute path and Call Operator (&) to guarantee execution
+    if (Test-Path $VENV_PYTHON) {
+        & $VENV_PYTHON -m pip install --upgrade pip
+        & $VENV_PYTHON -m pip install -r requirements.txt
+        
+        # 5. Mark as successfully installed so it skips this next time
+        New-Item -ItemType File -Path $REQ_FLAG -Force | Out-Null
+    } else {
+        Write-Host "ERROR: Python failed to create the virtual environment. Ensure your system Python is not restricted." -ForegroundColor Red
+        Exit
+    }
     Pop-Location
 }
 
