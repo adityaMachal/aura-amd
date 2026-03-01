@@ -1,69 +1,62 @@
-# 🤖 Aura-AMD: Local AI Acceleration Control Room
+# Aura-AMD: Local AI Acceleration Control Room
 
-**Aura-AMD** is a high-performance, privacy-first document intelligence platform. It leverages **INT8 Quantization** and **DirectML/CUDA** hardware acceleration to provide real-time RAG (Retrieval-Augmented Generation) insights directly on your local machine—no cloud API required.
+## Project Overview
 
-## 🚀 One-Command Setup
+Aura-AMD is a fully localized, hardware-accelerated AI document analysis and generation platform built for the 17th Unisys Innovation Program (UIP 2026). It is designed to run complex Large Language Models (LLMs) directly on consumer hardware, bridging the gap between high-performance AI and data privacy.
 
-We have automated the entire environment configuration, model synchronization, and service orchestration into a single PowerShell script.
+## Why It Is Necessary
 
-### 1. Configure Environment
+In the current enterprise and consumer landscape, relying on cloud-based AI presents several critical challenges:
 
-Before running the stack, set up your local environment variables:
+1. **Data Privacy and Security:** Sending sensitive documents, financial records, or internal communications to external APIs poses significant security risks and compliance violations.
+2. **High Latency:** Cloud inference is dependent on network stability and server load, leading to delayed responses.
+3. **Hardware Underutilization:** Modern laptops possess powerful dedicated graphics cards (specifically AMD Radeon and NVIDIA RTX series) that remain completely idle during cloud AI operations.
+4. **Deployment Friction:** Setting up local AI typically requires deep technical knowledge of Python virtual environments, CUDA drivers, and package managers, making it inaccessible to the average user.
 
-1. **Create `.env**`: Copy the provided example file.
-```powershell
-cp .env.example .env
+## Key Benefits
 
-```
+Aura-AMD solves these issues through a zero-friction, highly optimized architecture:
 
+* **Zero-Install Portable Bootstrap:** The application requires no pre-installed languages. It dynamically downloads portable, sandboxed versions of Go, Node.js, and Python, leaving the host operating system completely untouched.
+* **Universal Hardware Acceleration:** Utilizing the DirectML execution provider via ONNX Runtime, the system natively accelerates inference on both AMD and NVIDIA GPUs, defaulting to CPU execution only if a dedicated GPU is absent.
+* **Ultra-Low RAM Consumption:** By compiling the Go backend into a native binary and statically exporting the Next.js frontend, the system drastically reduces idle memory footprint compared to standard development environments.
+* **Offline Reliability:** Once the initial model sync is complete, the entire Retrieval-Augmented Generation (RAG) pipeline—including the INT8 Quantized Phi-2 model and FAISS vector database—runs 100 percent locally and offline.
 
-2. **Edit `.env**`: Open the file and ensure the `NEXT_PUBLIC_API_BASE` is set to your local Go backend.
-```text
-NEXT_PUBLIC_API_BASE=http://localhost:8080
+## User Usage Flow
 
-```
+The deployment process has been designed to be as simple as opening a standard desktop application.
 
+### Prerequisites
 
+* Windows 10 or 11 (DirectX 12 support required for DirectML acceleration).
+* An active internet connection (only required for the first run to sync models and runtimes).
 
-### 2. Run the Automation Script
+### Execution Steps
 
-Open a PowerShell terminal in the root directory and run:
+1. **Clone or Download the Repository:** Extract the project files to your desired folder.
+2. **Run the Application:** Simply double-click the `start.bat` file located in the root directory.
+3. **Access the Dashboard:** Once the terminal confirms the system is active, open your web browser and navigate to `http://localhost:3000`.
+4. **Shutdown:** Press `Ctrl+C` in the terminal to trigger the automated garbage collection, which safely closes all background processes and releases system ports.
 
-```powershell
-.\startup.ps1
+### What Happens Under the Hood?
 
-```
+When the application is launched for the first time, the background script performs the following automated sequence:
 
-**What this script does for you:**
+1. **Environment Resolution:** Detects missing runtimes and downloads portable Node.js, Go, and Python to a hidden `.runtimes` folder.
+2. **Asset Synchronization:** Fetches the required 2.7GB INT8 ONNX model directly from Hugging Face into the local directory.
+3. **Compilation:** Compiles the Go API into a lightweight binary and builds the Next.js frontend into a static production export.
+4. **Hardware Allocation:** Boots the background Python engine, loads the AI model directly into the dedicated GPU's VRAM, and links it to the Go backend via persistent inter-process communication (IPC) for instant chat responses.
 
-* **Frontend**: Automatically runs `npm install` if `node_modules` are missing.
-* **ML-Engine**: Creates a Python `.venv`, upgrades pip, and installs all requirements.
-* **Model Sync**: Detects if the **2.7GB INT8** model files exist; if not, it pulls them directly from our public Hugging Face repository.
-* **Parallel Launch**: Starts the Go Backend, Next.js Frontend, and Python ML environment in parallel background jobs.
+## Technical Stack
 
----
+* **Backend System:** Go (Compiled Binary)
+* **Machine Learning Engine:** Python 3.12 (ONNX Runtime, LangChain)
+* **Models:** Phi-2 (INT8 Quantized, 2.7GB) for text generation, all-MiniLM-L6-v2 for document embedding.
+* **Vector Storage:** FAISS and SQLite.
+* **Frontend Interface:** Next.js (Static Export), React.
 
-## 🛠️ Technical Architecture
+## Team Members
 
-| Component | Technology | Responsibility |
-| --- | --- | --- |
-| **Frontend** | Next.js (Tailwind CSS) | Real-time Dashboard with "Focus Mode" expanded chat. |
-| **Backend** | Go (Gin Framework) | High-concurrency API gateway and hardware spec provider. |
-| **ML Engine** | Python (Optimum + ONNX) | INT8 Quantized inference with dynamic DirectML/CUDA fallback. |
-| **Database** | SQLite + FAISS | Local persistent chat history and vector document storage. |
-
----
-
-## 👥 The Team
-
-* **Peeyush** ([@breadOnLaptop](https://github.com/breadOnLaptop)) — *Lead Developer & Architect*
-* **Aditya** ([@adityaMachal](https://github.com/adityaMachal)) — *Backend & Systems*
-* **Karthikeya** ([@Bharadwaj-Karthikeya](https://github.com/Bharadwaj-Karthikeya)) — *ML & Optimization*
-
----
-
-## 🧹 Garbage Collection
-
-To stop all services and clear the assigned ports (`3000` and `8080`), simply press **`Ctrl+C`** in the PowerShell window. The script will trigger an automated cleanup of all background jobs and processes.
-
----
+* **[Peeyush](https://github.com/breadOnLaptop):** Lead Developer & Architect and Backend & Systems
+* **[Aditya](https://github.com/adityaMachal):** ML & Optimization
+* **[Kartikeya](https://github.com/Bharadwaj-Karthikeya):** Frontend and UI Design Manager
