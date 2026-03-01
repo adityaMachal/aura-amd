@@ -34,9 +34,10 @@ The deployment process has been designed to be as simple as opening a standard d
 ### Execution Steps
 
 1. **Clone or Download the Repository:** Extract the project files to your desired folder.
-2. **Run the Application:** Simply double-click the `start.bat` file located in the root directory.
-3. **Access the Dashboard:** Once the terminal confirms the system is active, open your web browser and navigate to `http://localhost:3000`.
-4. **Shutdown:** Press `Ctrl+C` in the terminal to trigger the automated garbage collection, which safely closes all background processes and releases system ports.
+2. **Before running:** cd to frontend and run this command: `cp .env.example .env`
+3. **Run the Application:** Simply double-click the `start.bat` file located in the root directory.
+4. **Access the Dashboard:** Once the terminal confirms the system is active if not active it is a windows fault you have to press enter for each non-active window (there are 2 in particular), open your web browser and navigate to `http://localhost:3000`.
+5. **Shutdown:** Press `Ctrl+C` in the terminal to trigger the automated garbage collection, which safely closes all background processes and releases system ports.
 
 ### What Happens Under the Hood?
 
