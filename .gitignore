@@ -132,10 +132,18 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-
 # database
 *.db
 vector_stores
 
 ml-engine/model/onnx/*.onnx
 ml-engine/model/onnx/*.data
+
+# runtime environments
+.runtimes
+
+# build artifacts
+dist
+build
+out
+backend.exe
