@@ -17,7 +17,6 @@ $PY_DIR   = Join-Path $RUNTIMES_DIR "python\tools"
 # --- Globals & flags ---
 $Global:BackendProc     = $null
 $Global:FrontendProc    = $null
-$script:CancelRequested = $false
 $script:CleanupRunning  = $false
 
 # ==========================================
@@ -77,18 +76,34 @@ function Cleanup {
     Exit
 }
 
-$null = Register-ObjectEvent -InputObject ([Console]) -EventName CancelKeyPress -Action { $script:CancelRequested = $true }
+$null = Register-ObjectEvent -InputObject ([Console]) -EventName CancelKeyPress -SourceIdentifier "CtrlC_Pressed" -Action {
+    New-Event -SourceIdentifier "Shutdown_Triggered" | Out-Null
+}
 
 # ==========================================
-# PHASE 2: DYNAMIC RUNTIME RESOLUTION
+# PHASE 2: DYNAMIC RUNTIME & VERSION RESOLUTION
 # ==========================================
-Write-Host "--- Phase 1: Checking Local Environments ---" -ForegroundColor Cyan
+Write-Host "--- Phase 1: Checking Local Environments & Versions ---" -ForegroundColor Cyan
 $runtimePathAdditions = ""
 if (!(Test-Path $RUNTIMES_DIR)) { New-Item -ItemType Directory -Force -Path $RUNTIMES_DIR | Out-Null }
 
-# 1. Node Check
-if ($null -eq (Get-Command node -ErrorAction SilentlyContinue)) {
-    Write-Host "WARN: Node.js not found. Provisioning portable version..." -ForegroundColor Yellow
+$MIN_NODE = [version]"20.11.1"
+$MIN_GO   = [version]"1.22.1"
+$MIN_PY   = [version]"3.12.10"
+
+# 1. Node.js Check
+$needNode = $true
+if (Get-Command node -ErrorAction SilentlyContinue) {
+    try {
+        $nodeVerStr = (node -v).Trim().TrimStart('v')
+        if ([version]$nodeVerStr -ge $MIN_NODE) {
+            $needNode = $false
+            Write-Host "INFO: Local Node.js ($nodeVerStr) meets minimum ($MIN_NODE)." -ForegroundColor DarkGray
+        } else { Write-Host "WARN: Local Node.js ($nodeVerStr) is outdated. Minimum is $MIN_NODE." -ForegroundColor Yellow }
+    } catch { }
+}
+if ($needNode) {
+    Write-Host "RUN: Provisioning portable Node.js..." -ForegroundColor Yellow
     if (!(Test-Path $NODE_DIR)) {
         $nodeZip = Join-Path $RUNTIMES_DIR "node.zip"
         Invoke-WebRequest -Uri "https://nodejs.org/dist/v20.11.1/node-v20.11.1-win-x64.zip" -OutFile $nodeZip
@@ -100,8 +115,22 @@ if ($null -eq (Get-Command node -ErrorAction SilentlyContinue)) {
 }
 
 # 2. Go Check
-if ($null -eq (Get-Command go -ErrorAction SilentlyContinue)) {
-    Write-Host "WARN: Go not found. Provisioning portable version..." -ForegroundColor Yellow
+$needGo = $true
+if (Get-Command go -ErrorAction SilentlyContinue) {
+    try {
+        $goOut = go version
+        if ($goOut -match 'go(\d+\.\d+(\.\d+)?)') {
+            $goVerStr = $matches[1]
+            if ($goVerStr.Split('.').Count -eq 2) { $goVerStr += ".0" }
+            if ([version]$goVerStr -ge $MIN_GO) {
+                $needGo = $false
+                Write-Host "INFO: Local Go ($goVerStr) meets minimum ($MIN_GO)." -ForegroundColor DarkGray
+            } else { Write-Host "WARN: Local Go ($goVerStr) is outdated. Minimum is $MIN_GO." -ForegroundColor Yellow }
+        }
+    } catch { }
+}
+if ($needGo) {
+    Write-Host "RUN: Provisioning portable Go runtime..." -ForegroundColor Yellow
     if (!(Test-Path $GO_DIR)) {
         $goZip = Join-Path $RUNTIMES_DIR "go.zip"
         Invoke-WebRequest -Uri "https://go.dev/dl/go1.22.1.windows-amd64.zip" -OutFile $goZip
@@ -112,11 +141,24 @@ if ($null -eq (Get-Command go -ErrorAction SilentlyContinue)) {
 }
 
 # 3. Python Check
-if ($null -eq (Get-Command python -ErrorAction SilentlyContinue)) {
-    Write-Host "WARN: Python not found. Provisioning portable version..." -ForegroundColor Yellow
+$needPy = $true
+if (Get-Command python -ErrorAction SilentlyContinue) {
+    try {
+        $pyOut = python -V 2>&1 | Out-String
+        if ($pyOut -match 'Python (\d+\.\d+\.\d+)') {
+            $pyVerStr = $matches[1]
+            if ([version]$pyVerStr -ge $MIN_PY) {
+                $needPy = $false
+                Write-Host "INFO: Local Python ($pyVerStr) meets minimum ($MIN_PY)." -ForegroundColor DarkGray
+            } else { Write-Host "WARN: Local Python ($pyVerStr) is outdated. Minimum is $MIN_PY." -ForegroundColor Yellow }
+        }
+    } catch { }
+}
+if ($needPy) {
+    Write-Host "RUN: Provisioning portable Python $MIN_PY..." -ForegroundColor Yellow
     if (!(Test-Path $PY_DIR)) {
         $pyZip = Join-Path $RUNTIMES_DIR "python.zip"
-        Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/python/3.12.2" -OutFile $pyZip
+        Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/python/$MIN_PY" -OutFile $pyZip
         Expand-Archive -Path $pyZip -DestinationPath (Join-Path $RUNTIMES_DIR "python") -Force
         Remove-Item $pyZip
     }
@@ -130,86 +172,111 @@ if ($runtimePathAdditions -ne "") { $env:PATH = $runtimePathAdditions + $env:PAT
 # ==========================================
 Write-Host "`n--- Phase 2: Assets & Production Build ---" -ForegroundColor Cyan
 
-# Model Sync
+# Model Sync with Atomic Downloads and Size Verification
 $HF_REPO = "https://huggingface.co/breadOnLaptop/aura-amd-int8/resolve/main"
 $MODELS  = @("model-int8.onnx", "model-int8.onnx.data")
 if (!(Test-Path $ML_MODEL_DIR)) { New-Item -ItemType Directory -Force -Path $ML_MODEL_DIR | Out-Null }
+
+# Enforce stable network protocol for large downloads
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
 foreach ($file in $MODELS) {
     $target = Join-Path $ML_MODEL_DIR $file
-    if (!(Test-Path $target)) {
-        Write-Host "RUN: Downloading $file from Hugging Face..." -ForegroundColor Yellow
-        Invoke-WebRequest -Uri "$HF_REPO/$file" -OutFile $target
+    $tmpTarget = "$target.tmp"
+    $needsDownload = $false
+
+    # Clean up any leftover temp files from a previous crashed run
+    if (Test-Path $tmpTarget) { Remove-Item $tmpTarget -Force }
+
+    # Integrity Check
+    if (Test-Path $target) {
+        $localSize = (Get-Item $target).Length
+        # If the large .data file is less than 2.5 GB, it's a corrupted/partial file
+        if ($file -match "onnx.data" -and $localSize -lt 2500000000) {
+            Write-Host "WARN: $file is corrupted or incomplete (Local Size: $localSize bytes). Re-downloading..." -ForegroundColor Yellow
+            Remove-Item $target -Force
+            $needsDownload = $true
+        } else {
+            Write-Host "INFO: $file verified successfully." -ForegroundColor DarkGray
+        }
+    } else {
+        $needsDownload = $true
+    }
+
+    if ($needsDownload) {
+        Write-Host "RUN: Downloading $file from Hugging Face (This may take several minutes)..." -ForegroundColor Yellow
+        try {
+            # Download to a temporary file first
+            Invoke-WebRequest -Uri "$HF_REPO/$file" -OutFile $tmpTarget
+            # Only rename it to the official file if it completes 100% without errors
+            Rename-Item -Path $tmpTarget -NewName $file -Force
+        } catch {
+            Write-Host "`nERROR: Download interrupted or failed. Please run the script again." -ForegroundColor Red
+            if (Test-Path $tmpTarget) { Remove-Item $tmpTarget -Force }
+            Exit
+        }
     }
 }
 
-# ML .venv Setup (Bulletproof Version)
 $VENV_DIR = Join-Path $ML_DIR ".venv"
-$VENV_PYTHON = Join-Path $VENV_DIR "Scripts\python.exe"
 $REQ_FLAG = Join-Path $ML_DIR ".installed"
 
-if (!(Test-Path $REQ_FLAG)) {
-    Write-Host "RUN: Creating isolated .venv and installing ML dependencies..." -ForegroundColor Yellow
+if (!(Test-Path $VENV_DIR) -or !(Test-Path $REQ_FLAG)) {
+    Write-Host "RUN: Creating/Repairing isolated .venv and installing ML dependencies..." -ForegroundColor Yellow
     Push-Location $ML_DIR
-    
-    # 1. Wipe out any broken/half-finished .venv from previous errors
+
     if (Test-Path $VENV_DIR) { Remove-Item -Path $VENV_DIR -Recurse -Force }
-    
-    # 2. Create the virtual environment
     python -m venv .venv
-    
-    # 3. Fallback check: Some Windows Python versions create a 'bin' folder instead of 'Scripts'
-    if (!(Test-Path $VENV_PYTHON)) {
-        $VENV_PYTHON = Join-Path $VENV_DIR "bin\python.exe"
-    }
-    
-    # 4. Use the absolute path and Call Operator (&) to guarantee execution
+
+    $VENV_PYTHON = Join-Path $VENV_DIR "Scripts\python.exe"
+    if (!(Test-Path $VENV_PYTHON)) { $VENV_PYTHON = Join-Path $VENV_DIR "bin\python.exe" }
+
     if (Test-Path $VENV_PYTHON) {
         & $VENV_PYTHON -m pip install --upgrade pip
         & $VENV_PYTHON -m pip install -r requirements.txt
-        
-        # 5. Mark as successfully installed so it skips this next time
         New-Item -ItemType File -Path $REQ_FLAG -Force | Out-Null
     } else {
-        Write-Host "ERROR: Python failed to create the virtual environment. Ensure your system Python is not restricted." -ForegroundColor Red
+        Write-Host "ERROR: Python failed to create the virtual environment." -ForegroundColor Red
         Exit
     }
     Pop-Location
+} else {
+    Write-Host "INFO: Python .venv is healthy and verified." -ForegroundColor DarkGray
 }
 
-# Compile Go Backend inside the backend/ folder
-$backendExe = Join-Path $BACKEND_DIR "backend.exe"
-if (!(Test-Path $backendExe)) {
-    Write-Host "RUN: Compiling Go Backend to binary..." -ForegroundColor Yellow
-    Push-Location $BACKEND_DIR; go build -o backend.exe .\cmd\api\main.go; Pop-Location
-}
+Write-Host "RUN: Compiling Go Backend to binary..." -ForegroundColor Yellow
+Push-Location $BACKEND_DIR
+go build -o backend.exe .\cmd\api\main.go
+Pop-Location
 
-# Build Frontend to frontend/out/
-if (!(Test-Path (Join-Path $FRONTEND_DIR "out"))) {
-    Write-Host "RUN: Building Next.js Frontend for Production..." -ForegroundColor Yellow
-    Push-Location $FRONTEND_DIR
-    if (!(Test-Path "node_modules")) { npm install }
-    npm run build
-    Pop-Location
-}
+Write-Host "RUN: Building Next.js Frontend for Production..." -ForegroundColor Yellow
+Push-Location $FRONTEND_DIR
+if (!(Test-Path "node_modules")) { npm install }
+npm run build
+Pop-Location
 
 # ==========================================
-# PHASE 4: EXECUTION (Low RAM Mode)
+# PHASE 4: EXECUTION (High Priority Mode)
 # ==========================================
 try {
     Write-Host "`n--- Phase 3: Launching Services ---" -ForegroundColor Cyan
 
-    # FIX: Run local Go exe and use 'npx serve' for the static frontend
     $backendCmd  = "/k cd /d `"$BACKEND_DIR`" & .\backend.exe"
     $frontendCmd = "/k cd /d `"$FRONTEND_DIR`" & npx serve@latest out -p 3000"
 
     $Global:BackendProc  = Start-Process -FilePath "cmd.exe" -ArgumentList $backendCmd -PassThru
     $Global:FrontendProc = Start-Process -FilePath "cmd.exe" -ArgumentList $frontendCmd -PassThru
 
-    Write-Host "`n🚀 Aura-AMD Active (Production Mode - High Performance)" -ForegroundColor Green
+    try {
+        $Global:BackendProc.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::High
+        $Global:FrontendProc.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::AboveNormal
+    } catch { }
+
+    Write-Host "`n🚀 Aura-AMD Active (Production Mode - High Priority)" -ForegroundColor Green
     Write-Host "Dashboard: http://localhost:3000" -ForegroundColor White
     Write-Host "Press Ctrl+C in this window to trigger Hard-Kill shutdown..." -ForegroundColor Magenta
 
-    while (-not $script:CancelRequested) { Start-Sleep -Seconds 1 }
+    Wait-Event -SourceIdentifier "Shutdown_Triggered" | Out-Null
 } finally {
     Cleanup
 }

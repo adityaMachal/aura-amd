@@ -141,6 +141,7 @@ ml-engine/model/onnx/*.data
 
 # runtime environments
 .runtimes
+.installed
 
 # build artifacts
 dist

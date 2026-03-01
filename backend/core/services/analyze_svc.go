@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 
@@ -47,7 +48,13 @@ func (s *analyzeSvcImpl) runAI(id string, ext string) {
 	fp := filepath.Join("uploads", id+ext)
 
 	// Hardwire Go to use the virtual environment's Python executable
+	// 1. Define the default Windows path
 	pythonBin := filepath.Join("..", "ml-engine", ".venv", "Scripts", "python.exe")
+
+	// 2. Check if the Scripts path exists. If not, switch to the bin path.
+	if _, err := os.Stat(pythonBin); os.IsNotExist(err) {
+		pythonBin = filepath.Join("..", "ml-engine", ".venv", "bin", "python.exe")
+	}
 	scriptPath := filepath.Join("..", "ml-engine", "inference", "predict.py")
 
 	cmd := exec.Command(pythonBin, scriptPath, fp)
