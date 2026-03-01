@@ -5,6 +5,8 @@ import sqlite3
 import warnings
 import logging
 
+import torch # Required for hardware detection
+
 from langchain_community.document_loaders import PyPDFLoader # type: ignore
 from langchain_text_splitters import RecursiveCharacterTextSplitter # type: ignore
 from langchain_huggingface import HuggingFaceEmbeddings # type: ignore
@@ -16,7 +18,6 @@ os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 warnings.filterwarnings("ignore")
 
-# Moved storage up to the root folder (aura-amd/)
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "aura_store.db")
 
 def init_db():
@@ -40,10 +41,18 @@ def process_document(task_id, file_path):
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
         chunks = text_splitter.split_documents(documents)
 
-        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+        # 1. HARDWARE TARGETING: Check for native PyTorch CUDA (Nvidia) support
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        # 2. ACCELERATION: Pass the device and increase the batch size
+        embeddings = HuggingFaceEmbeddings(
+            model_name="all-MiniLM-L6-v2",
+            model_kwargs={'device': device},
+            encode_kwargs={'batch_size': 32} # Processes 32 chunks simultaneously instead of 1
+        )
+
         vector_db = FAISS.from_documents(chunks, embeddings)
 
-        # Moved vector store up to the root folder (aura-amd/vector_stores)
         faiss_path = os.path.join(os.path.dirname(__file__), "..", "..", "vector_stores", task_id)
         os.makedirs(faiss_path, exist_ok=True)
         vector_db.save_local(faiss_path)
@@ -56,7 +65,7 @@ def process_document(task_id, file_path):
         conn.close()
 
         return {
-            "summary": f"Document analyzed successfully. {len(chunks)} chunks embedded and logged to SQLite.",
+            "summary": f"Document analyzed successfully. {len(chunks)} chunks embedded via {device.upper()} and logged.",
             "tokens_per_sec": 0
         }
     except Exception as e:

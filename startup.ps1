@@ -1,64 +1,28 @@
+# Force UTF-8 Encoding to fix the emoji/character corruption
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = "Stop"
 
-# --- Paths ---
+# --- Project Paths ---
 $ROOT           = Get-Location
 $BACKEND_DIR    = Join-Path $ROOT "backend"
 $FRONTEND_DIR   = Join-Path $ROOT "frontend"
 $ML_DIR         = Join-Path $ROOT "ml-engine"
 $ML_MODEL_DIR   = Join-Path $ML_DIR "model\onnx"
-$VENV_PATH      = Join-Path $ML_DIR ".venv"
-$VENV_ACTIVATE  = Join-Path $VENV_PATH "Scripts\activate.bat"
+$RUNTIMES_DIR   = Join-Path $ROOT ".runtimes"
 
-# --- Hugging Face Config ---
-$HF_REPO = "https://huggingface.co/breadOnLaptop/aura-amd-int8/resolve/main"
-$MODELS  = @("model-int8.onnx", "model-int8.onnx.data")
+$NODE_DIR = Join-Path $RUNTIMES_DIR "node"
+$GO_DIR   = Join-Path $RUNTIMES_DIR "go\go"
+$PY_DIR   = Join-Path $RUNTIMES_DIR "python\tools"
 
 # --- Globals & flags ---
-$Global:BackendProc   = $null
-$Global:FrontendProc  = $null
+$Global:BackendProc     = $null
+$Global:FrontendProc    = $null
 $script:CancelRequested = $false
 $script:CleanupRunning  = $false
 
 # ==========================================
-# PHASE 1: EXISTENCE CHECKS (SETUP)
+# PHASE 1: HELPERS & GARBAGE COLLECTION
 # ==========================================
-Write-Host "--- Phase 1: Environment & Model Verification ---" -ForegroundColor Cyan
-
-# 1. Local Model Check
-if (!(Test-Path $ML_MODEL_DIR)) { New-Item -ItemType Directory -Force -Path $ML_MODEL_DIR | Out-Null }
-foreach ($file in $MODELS) {
-    $target = Join-Path $ML_MODEL_DIR $file
-    if (!(Test-Path $target)) {
-        Write-Host "[Models] $file missing locally. Downloading from Hugging Face..." -ForegroundColor Yellow
-        Invoke-WebRequest -Uri "$HF_REPO/$file" -OutFile $target
-        Write-Host "[Models] $file successfully downloaded." -ForegroundColor Green
-    } else { 
-        Write-Host "[Models] $file verified locally." -ForegroundColor Gray 
-    }
-}
-
-# 2. Frontend Dependency Check
-if (!(Test-Path (Join-Path $FRONTEND_DIR "node_modules"))) {
-    Write-Host "[Frontend] node_modules missing. Running npm install..." -ForegroundColor Yellow
-    Push-Location $FRONTEND_DIR
-    npm install
-    Pop-Location
-} else { Write-Host "[Frontend] node_modules verified." -ForegroundColor Gray }
-
-# 3. ML-Engine Venv Check
-if (!(Test-Path $VENV_PATH)) {
-    Write-Host "[ML-Engine] .venv missing. Initializing Python environment..." -ForegroundColor Yellow
-    Push-Location $ML_DIR
-    python -m venv .venv
-    .\.venv\Scripts\python.exe -m pip install --upgrade pip
-    .\.venv\Scripts\pip.exe install -r requirements.txt
-    Pop-Location
-} else { Write-Host "[ML-Engine] Python .venv verified." -ForegroundColor Gray }
-
-# ==========================================
-# PHASE 2: HELPERS & CLEANUP LOGIC
-# ==========================================
-
 function Kill-ProcessTree {
     param([int]$ProcessId)
     if (-not $ProcessId) { return }
@@ -75,8 +39,8 @@ function TryGracefulClose {
     if ($null -eq $Proc) { return $false }
     try {
         if ($Proc.HasExited) { return $true }
-        Write-Host "RUN: Attempting graceful CloseMainWindow for PID $($Proc.Id)" -ForegroundColor DarkCyan
-        $closed = $Proc.CloseMainWindow()
+        $closed = $false
+        try { $closed = $Proc.CloseMainWindow() } catch {}
         if ($closed) {
             if ($Proc.WaitForExit($timeoutSeconds * 1000)) { return $true }
         }
@@ -87,59 +51,142 @@ function TryGracefulClose {
 function Cleanup {
     if ($script:CleanupRunning) { return }
     $script:CleanupRunning = $true
-    Write-Host "`nRUN: Initiating Confirmed Hard-Kill Garbage Collection..." -ForegroundColor Red
+    Write-Host "`nRUN: Initiating Confirmed Hard-Kill..." -ForegroundColor Red
 
     if ($null -ne $Global:BackendProc) {
         Write-Host "WARN: Cleaning Backend (PID: $($Global:BackendProc.Id))" -ForegroundColor Yellow
-        if (-not (TryGracefulClose -Proc $Global:BackendProc -timeoutSeconds 2)) {
-            Kill-ProcessTree -ProcessId $Global:BackendProc.Id
-        }
+        if (-not (TryGracefulClose -Proc $Global:BackendProc -timeoutSeconds 3)) { Kill-ProcessTree -ProcessId $Global:BackendProc.Id }
     }
     if ($null -ne $Global:FrontendProc) {
         Write-Host "WARN: Cleaning Frontend (PID: $($Global:FrontendProc.Id))" -ForegroundColor Yellow
-        if (-not (TryGracefulClose -Proc $Global:FrontendProc -timeoutSeconds 2)) {
-            Kill-ProcessTree -ProcessId $Global:FrontendProc.Id
-        }
+        if (-not (TryGracefulClose -Proc $Global:FrontendProc -timeoutSeconds 3)) { Kill-ProcessTree -ProcessId $Global:FrontendProc.Id }
     }
 
-    # Port Closure
     $ports = @(8080, 3000)
     foreach ($p in $ports) {
-        $conns = Get-NetTCPConnection -LocalPort $p -ErrorAction SilentlyContinue
-        if ($conns) {
-            foreach ($c in $conns) {
-                if ($c.OwningProcess) { Kill-ProcessTree -ProcessId $c.OwningProcess }
+        try {
+            $conns = Get-NetTCPConnection -LocalPort $p -ErrorAction SilentlyContinue
+            if ($conns) {
+                foreach ($c in $conns) {
+                    if ($c.OwningProcess) { Kill-ProcessTree -ProcessId $c.OwningProcess }
+                }
             }
-        }
+        } catch { }
     }
-    Write-Host "--- Cleanup complete. System Ready. ---" -ForegroundColor Green
+    Write-Host "--- Cleanup complete ---" -ForegroundColor Green
     Exit
 }
 
-# --- Register Ctrl+C ---
-$null = Register-ObjectEvent -InputObject ([Console]) -EventName CancelKeyPress -Action {
-    $script:CancelRequested = $true
+$null = Register-ObjectEvent -InputObject ([Console]) -EventName CancelKeyPress -Action { $script:CancelRequested = $true }
+
+# ==========================================
+# PHASE 2: DYNAMIC RUNTIME RESOLUTION
+# ==========================================
+Write-Host "--- Phase 1: Checking Local Environments ---" -ForegroundColor Cyan
+$runtimePathAdditions = ""
+if (!(Test-Path $RUNTIMES_DIR)) { New-Item -ItemType Directory -Force -Path $RUNTIMES_DIR | Out-Null }
+
+# 1. Node Check
+if ($null -eq (Get-Command node -ErrorAction SilentlyContinue)) {
+    Write-Host "WARN: Node.js not found. Provisioning portable version..." -ForegroundColor Yellow
+    if (!(Test-Path $NODE_DIR)) {
+        $nodeZip = Join-Path $RUNTIMES_DIR "node.zip"
+        Invoke-WebRequest -Uri "https://nodejs.org/dist/v20.11.1/node-v20.11.1-win-x64.zip" -OutFile $nodeZip
+        Expand-Archive -Path $nodeZip -DestinationPath $RUNTIMES_DIR -Force
+        Rename-Item -Path (Join-Path $RUNTIMES_DIR "node-v20.11.1-win-x64") -NewName "node"
+        Remove-Item $nodeZip
+    }
+    $runtimePathAdditions += "$NODE_DIR;"
+}
+
+# 2. Go Check
+if ($null -eq (Get-Command go -ErrorAction SilentlyContinue)) {
+    Write-Host "WARN: Go not found. Provisioning portable version..." -ForegroundColor Yellow
+    if (!(Test-Path $GO_DIR)) {
+        $goZip = Join-Path $RUNTIMES_DIR "go.zip"
+        Invoke-WebRequest -Uri "https://go.dev/dl/go1.22.1.windows-amd64.zip" -OutFile $goZip
+        Expand-Archive -Path $goZip -DestinationPath $RUNTIMES_DIR -Force
+        Remove-Item $goZip
+    }
+    $runtimePathAdditions += "$GO_DIR\bin;"
+}
+
+# 3. Python Check
+if ($null -eq (Get-Command python -ErrorAction SilentlyContinue)) {
+    Write-Host "WARN: Python not found. Provisioning portable version..." -ForegroundColor Yellow
+    if (!(Test-Path $PY_DIR)) {
+        $pyZip = Join-Path $RUNTIMES_DIR "python.zip"
+        Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/python/3.12.2" -OutFile $pyZip
+        Expand-Archive -Path $pyZip -DestinationPath (Join-Path $RUNTIMES_DIR "python") -Force
+        Remove-Item $pyZip
+    }
+    $runtimePathAdditions += "$PY_DIR;$PY_DIR\Scripts;"
+}
+
+if ($runtimePathAdditions -ne "") { $env:PATH = $runtimePathAdditions + $env:PATH }
+
+# ==========================================
+# PHASE 3: DEPENDENCY, VENV, & PRODUCTION BUILD
+# ==========================================
+Write-Host "`n--- Phase 2: Assets & Production Build ---" -ForegroundColor Cyan
+
+# Model Sync
+$HF_REPO = "https://huggingface.co/breadOnLaptop/aura-amd-int8/resolve/main"
+$MODELS  = @("model-int8.onnx", "model-int8.onnx.data")
+if (!(Test-Path $ML_MODEL_DIR)) { New-Item -ItemType Directory -Force -Path $ML_MODEL_DIR | Out-Null }
+foreach ($file in $MODELS) {
+    $target = Join-Path $ML_MODEL_DIR $file
+    if (!(Test-Path $target)) {
+        Write-Host "RUN: Downloading $file from Hugging Face..." -ForegroundColor Yellow
+        Invoke-WebRequest -Uri "$HF_REPO/$file" -OutFile $target
+    }
+}
+
+# ML .venv Setup
+$VENV_DIR = Join-Path $ML_DIR ".venv"
+if (!(Test-Path $VENV_DIR)) {
+    Write-Host "RUN: Creating isolated .venv and installing ML dependencies..." -ForegroundColor Yellow
+    Push-Location $ML_DIR
+    python -m venv .venv
+    .\.venv\Scripts\python.exe -m pip install --upgrade pip
+    .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+    Pop-Location
+}
+
+# Compile Go Backend inside the backend/ folder
+$backendExe = Join-Path $BACKEND_DIR "backend.exe"
+if (!(Test-Path $backendExe)) {
+    Write-Host "RUN: Compiling Go Backend to binary..." -ForegroundColor Yellow
+    Push-Location $BACKEND_DIR; go build -o backend.exe .\cmd\api\main.go; Pop-Location
+}
+
+# Build Frontend to frontend/out/
+if (!(Test-Path (Join-Path $FRONTEND_DIR "out"))) {
+    Write-Host "RUN: Building Next.js Frontend for Production..." -ForegroundColor Yellow
+    Push-Location $FRONTEND_DIR
+    if (!(Test-Path "node_modules")) { npm install }
+    npm run build
+    Pop-Location
 }
 
 # ==========================================
-# PHASE 3: MAIN EXECUTION
+# PHASE 4: EXECUTION (Low RAM Mode)
 # ==========================================
 try {
-    Write-Host "`n--- Phase 2: Parallel Execution ---" -ForegroundColor Cyan
-    
-    # Logic: Start CMD -> CD Backend -> Activate ML Venv -> Go Run
-    $backendCmd  = "/k cd /d `"$BACKEND_DIR`" && call `"$VENV_ACTIVATE`" && go run .\cmd\api\main.go"
-    $frontendCmd = "/k cd /d `"$FRONTEND_DIR`" && npm run dev"
+    Write-Host "`n--- Phase 3: Launching Services ---" -ForegroundColor Cyan
+
+    # FIX: Run local Go exe and use 'npx serve' for the static frontend
+    $backendCmd  = "/k cd /d `"$BACKEND_DIR`" & .\backend.exe"
+    $frontendCmd = "/k cd /d `"$FRONTEND_DIR`" & npx serve@latest out -p 3000"
 
     $Global:BackendProc  = Start-Process -FilePath "cmd.exe" -ArgumentList $backendCmd -PassThru
     $Global:FrontendProc = Start-Process -FilePath "cmd.exe" -ArgumentList $frontendCmd -PassThru
 
-    Write-Host "`nAura-AMD Active (INT8 Optimization)" -ForegroundColor Green
+    Write-Host "`n🚀 Aura-AMD Active (Production Mode - High Performance)" -ForegroundColor Green
     Write-Host "Dashboard: http://localhost:3000" -ForegroundColor White
-    Write-Host "Press Ctrl+C in THIS window to stop all services." -ForegroundColor Magenta
+    Write-Host "Press Ctrl+C in this window to trigger Hard-Kill shutdown..." -ForegroundColor Magenta
 
     while (-not $script:CancelRequested) { Start-Sleep -Seconds 1 }
-}
-finally {
+} finally {
     Cleanup
 }
